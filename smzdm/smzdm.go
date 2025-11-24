@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -119,14 +120,62 @@ func GetGoods(page int, keword string) result {
 	Url.RawQuery = params.Encode()
 	urlPath := Url.String()
 	fmt.Println(urlPath)
-	resp, err := http.Get(urlPath)
+
+	// 使用带超时的 http.Client 并设置常见请求头（最小改动以避免被远端拒绝或请求长时间阻塞）
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	req, err := http.NewRequest("GET", urlPath, nil)
 	if err != nil {
+		log.Printf("构建请求失败: %v\n", err)
+		return res
+	}
+	// 设置 User-Agent 与 Accept，保留原有行为同时减少被屏蔽的几率
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; smzdmForGo/1.0; +https://github.com/gmdig/smzdmForGo2)")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// 网络层错误或超时
+		log.Printf("HTTP 请求失败: %v\n", err)
 		return res
 	}
 	defer resp.Body.Close()
+
+	// 打印 HTTP 状态，便于诊断被封/重定向/认证等问题
+	log.Printf("HTTP %s -> %s\n", urlPath, resp.Status)
+
 	body, _ := ioutil.ReadAll(resp.Body)
 
-	_ = json.Unmarshal(body, &res)
+	// 如果响应不是 200，打印 body 的前几百字节以帮助定位
+	if resp.StatusCode != 200 {
+		preview := string(body)
+		if len(preview) > 1000 {
+			preview = preview[:1000]
+		}
+		log.Printf("非 200 响应 (%d). body preview: %s\n", resp.StatusCode, preview)
+		return res
+	}
+
+	// 反序列化，并在反序列化错误或 Data.Rows 为空时记录 body 以便排查
+	if err := json.Unmarshal(body, &res); err != nil {
+		preview := string(body)
+		if len(preview) > 2000 {
+			preview = preview[:2000]
+		}
+		log.Printf("JSON Unmarshal 错误: %v\nbody preview: %s\n", err, preview)
+		return res
+	}
+
+	// 如果成功解析但没有 rows，打印 body preview（便于确认 API 返回了空列表还是结构变化）
+	if len(res.Data.Rows) == 0 {
+		preview := string(body)
+		if len(preview) > 1000 {
+			preview = preview[:1000]
+		}
+		log.Printf("解析成功但 rows 为空。body preview: %s\n", preview)
+	}
+
 	return res
 }
 
